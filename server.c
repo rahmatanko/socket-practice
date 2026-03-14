@@ -89,6 +89,7 @@ int main() {
     struct cmsghdr * cmsg_header = CMSG_FIRSTHDR(&header);
 
     while (running) {
+        // emptying the buffer after each run
         memset(fd_buf, 0, sizeof(fd_buf));
         // this means that if it fails, we shouldn't be shutting the whole thing down, just skip over this one
         // btw accept is blocking (checl that out with strace), thats why multithreaded servers are so gudddt
