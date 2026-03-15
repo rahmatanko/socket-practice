@@ -1,3 +1,16 @@
+/*
+so when I tried to use pidfd_getfd the first time I got an EPERM error, which means that this process didnt have PTRACE_MODE_ATTACH_REALCREDS permissions
+and in ptrace.c you can see that __ptrace_may_access either needs your pid and eveyrhting else to match the pid you wanna use in the syscall or 
+you must have cap_sys_ptrace capability on the file
+
+so after make, run sudo setcap cap_sys_ptrace+ep ./server
+e - effective, using the capability now
+i - inheritable, child processes can use it
+p - permitted, you're allowed to use it (bare minimum ig)
+*/
+
+
+
 // regular stuff
 #define _GNU_SOURCE // lets us use the full featured ver of the signal lib
 #include <signal.h> // handling ctrl+C so that everything is cleaned up nicely
@@ -7,20 +20,19 @@
 #include <unistd.h> // close
 
 // socket specific libs - ill get there when i get there
-#include <sys/socket.h> // socket(), bind(), listen()
-#include <sys/un.h> // sockaddr_un
+#include <sys/socket.h>     // socket(), bind(), listen()
+#include <sys/syscall.h>    // for pidfd stuff
+#include <sys/un.h>         // sockaddr_un
+#include <sys/ptrace.h>     // ptrace tog et fd openin permissions
 
-// ouh i remember this from microprocessors, 
 // we set the var to volatile cus otherwise the compiler might see that the variable doesnt change in main
 // and that the handler isnt called in main so the var is optimized away
 volatile int running = 1;
 
 void handler(int sig) {
-    (void) sig;
+    (void) sig; // use (void) to tell the compiler that you're not using an indentifier anymore
     running = 0;
-    printf("\nshutting down neow,,,\n");
 }
-
 
 int main() {
     // signal handling settings
@@ -53,7 +65,7 @@ int main() {
     // listen for connections, max 20 in the queue
     if (listen(listen_fd, 20) < 0) {perror("listenin aint workin"); exit(EXIT_FAILURE);}
 
-    // we need to set the SO_PASSCRED option so that we can pass pids, etc, using SCM_CREDENTIALS
+    // we need to set the SO_PASSCRED option so that we can recieve pids, etc, using SCM_CREDENTIALS
     int enable = 1;
     setsockopt(listen_fd, SOL_SOCKET, SO_PASSCRED, &enable, sizeof(enable));
 
@@ -62,8 +74,9 @@ int main() {
     socklen_t conn_size = sizeof(conn_address); // need it as a varibale to it could be reference in accept()
     // so this socket is specifically for that specific accepted connection, while our prev socket is the one that welcomes all the connections in general
     int accept_fd;
-    // buffer for our main message
-    char message[1024];
+    // what'll hold the original fd
+    int ogfd;
+    char buf[1024]; // a buffer
     // the ds we'll use to store the credentials
     struct ucred creds; // apparently pid_t, gid_t, uid_t wont ever be larger than a long so we'll print them that way
 
@@ -82,7 +95,7 @@ int main() {
     header.msg_namelen = 0;
     // now we have to store the message itself
     struct iovec tosend; // its a ds sys calls use for arrays
-    tosend.iov_base = message; tosend.iov_len = sizeof(message);
+    tosend.iov_base = &ogfd; tosend.iov_len = sizeof(ogfd);
     // now lets bind that iov to the message header
     header.msg_iov = &tosend;
     header.msg_iovlen = 1; 
@@ -93,8 +106,10 @@ int main() {
     struct cmsghdr * cmsg_header = CMSG_FIRSTHDR(&header);
 
     while (running) {
+        // empty the buffer
+        memset(buf, 0, 1024);
         // this means that if it fails, we shouldn't be shutting the whole thing down, just skip over this one
-        // btw accept is blocking (checl that out with strace), thats why multithreaded servers are so gudddt
+        // btw accept is blocking (check that out with strace you'll see accept(fd,                and more space)), thats why multithreaded servers are so gudddt
         accept_fd = accept(listen_fd, (struct sockaddr *) &conn_address, &conn_size);
         if (accept_fd < 0) {
             // if its bcs of the signal handler then we just break de loop
@@ -102,17 +117,35 @@ int main() {
             perror("connected socket isn't socketing, onto the next one"); close(accept_fd); continue;
         }
         // lets retrieve our messageee :3
-        if (recvmsg(accept_fd, &header, 0) == -1) perror("receivin went wrong");
+        if (recvmsg(accept_fd, &header, 0) == -1) {perror("receivin went wrong"); close(accept_fd); continue;}
         // now the original message is stored in its complementary variable
-        printf("the main message: %s\n", message);
+        printf("the original fd: %d\n", ogfd);
         memcpy(&creds, CMSG_DATA(cmsg_header), sizeof(struct ucred));
         printf("The credentials:\npid: %d\ngid: %d\nuid: %d\n", creds.pid, creds.gid, creds.uid);
+
+        // get the pidfd
+        int pidfd = syscall(SYS_pidfd_open, creds.pid, NULL);
+        if (pidfd == -1) {perror("didn't get the pidfd"); close(accept_fd); close(pidfd); continue;}
+
+        // snatch the tara fd from the other other process
+        int tara = syscall(SYS_pidfd_getfd, pidfd, ogfd, NULL);
+        if (tara == -1) {perror("didn't get tara fd"); close(tara); close(pidfd); close(accept_fd); continue;}
+        printf("new fd: %d\n\n", tara);
+        // we can read it now
+        ssize_t n = read(tara, buf, 1024);
+        if (n == -1) {perror("reading went wrong"); close(tara); close(pidfd); close(accept_fd); continue;}
+        buf[n] = '\0';
+        
+        // file contents
+        printf("file contents:\n%s\n", buf);
+
+        close(tara); close(pidfd); // they're fds they have to be closed
         close(accept_fd); // still need to close it
     }
     
     // remember that bind creates that temp.sock file so we have to use unlink to delete that file
     unlink("temp/temp.sock");
-    // i think we have to decouple and close stuff here but we won't reach it for now
+    // i think we have to decouple and close stuff here 
     close(accept_fd); close(listen_fd);
     printf("\ncleanup is done!!\n");
     

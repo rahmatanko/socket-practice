@@ -1,8 +1,8 @@
 // regular stuff
-#define _GNU_SOURCE
+#define _GNU_SOURCE // for full use of sockopts + struct ucred
 #include <stdio.h>  // printf, perror
 #include <stdlib.h> // exit
-#include <string.h> // memset, strncpy, memcpy(?)
+#include <string.h> // memset, strncpy, memcpy
 #include <unistd.h> // close
 #include <fcntl.h>  // open
 
@@ -32,13 +32,14 @@ int main() {
     // we need to set the SO_PASSCRED option so that we can pass pids, etc, using SCM_CREDENTIALS
     int enable = 1;
     setsockopt(conn_fd, SOL_SOCKET, SO_PASSCRED, &enable, sizeof(enable));
-    // we send a message neow
-    char msg[] = "muspi merol\n"; // sizeof doesnt work if you do char * msg bcs it checks the size of the pointer itself
+
+    // make the fd that we'll send
+    int tara = open("temp/taraduncan.txt", O_RDONLY);
 
     // need to use a union for alignment, this will hold the ancillary data itself
     union {
         char buf[CMSG_SPACE(sizeof(struct ucred))];
-        struct cmsghdr align;
+        struct cmsghdr align; // now the buffer will have the same padding as the struct cmsghdr type i think
     } cmsg;
 
     // main message header
@@ -49,7 +50,7 @@ int main() {
     header.msg_namelen = 0;
     // now we have to store the message itself
     struct iovec tosend; // its a ds sys calls use for arrays
-    tosend.iov_base = msg; tosend.iov_len = sizeof(msg);
+    tosend.iov_base = &tara; tosend.iov_len = sizeof(tara);
     // now lets bind that iov to the message header
     header.msg_iov = &tosend;
     header.msg_iovlen = 1; // this isnt supposed to be the actual size of the array itself, but rather the number of buffers/arrays were dealin with
@@ -73,11 +74,15 @@ int main() {
     cmsg_header->cmsg_type = SCM_CREDENTIALS;
     cmsg_header->cmsg_len = CMSG_LEN(sizeof(struct ucred)); //cant set it directly cus length differs bcs the paddding differs across different archs me thinks
     memcpy(CMSG_DATA(cmsg_header), &creds, sizeof(creds)); 
-    
+
     // now we finally send the message
     ssize_t n = sendmsg(conn_fd, &header, 0);
     if (n < 0 ) perror("sending didnt work out");
 
+    // gotta wait for the server to get the tara fd, otherwise close(tara) will happen before it has a chance to
+    sleep(2);
+
     // welp business is done, we close the socket, and the other open fds on our side atleast
     close(conn_fd);
+    close(tara);
 }
