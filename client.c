@@ -1,4 +1,5 @@
 // regular stuff
+#define _GNU_SOURCE
 #include <stdio.h>  // printf, perror
 #include <stdlib.h> // exit
 #include <string.h> // memset, strncpy, memcpy(?)
@@ -11,6 +12,7 @@
 #include <string.h>     // strcpy
 
 int main() {
+
     // we need to connect to the other socket htru the same sock file ig?
     struct sockaddr_un send_addr;
     // 0 out all the other bits so that we dont have random values in there that mess up everything
@@ -27,15 +29,15 @@ int main() {
         perror("connection ain't connecting");
         exit(EXIT_FAILURE);
     }
+    // we need to set the SO_PASSCRED option so that we can pass pids, etc, using SCM_CREDENTIALS
+    int enable = 1;
+    setsockopt(conn_fd, SOL_SOCKET, SO_PASSCRED, &enable, sizeof(enable));
     // we send a message neow
-    char msg[] = "KAEYA BAYBAY\n"; // sizeof doesnt work if you do char * msg bcs it checks the size of the pointer itself
-    int cookie_fd = open("temp/cookie.txt", O_RDONLY);
-    int banana_fd = open("temp/banana.txt", O_RDONLY);
-    int fds[2] = {cookie_fd, banana_fd};
+    char msg[] = "muspi merol\n"; // sizeof doesnt work if you do char * msg bcs it checks the size of the pointer itself
 
     // need to use a union for alignment, this will hold the ancillary data itself
     union {
-        char buf[CMSG_SPACE(sizeof(fds))];
+        char buf[CMSG_SPACE(sizeof(struct ucred))];
         struct cmsghdr align;
     } cmsg;
 
@@ -56,20 +58,26 @@ int main() {
     header.msg_control = (struct msghdr *) cmsg.buf;
     header.msg_controllen = sizeof(cmsg.buf);
 
+    // ds for passing the process info
+    struct ucred creds;
+    creds.pid = getpid(); // get process id of the calling process
+    creds.gid = getgid(); // get group id , this is permissions related to like peripheral usage i think
+    creds.uid = getuid(); // which user is running the process i guess
+
     // control message header
     struct cmsghdr * cmsg_header; // needs to be a pointer for the header's sake i think?
     // now neva forget: we have to make sure were modifying the cmsg buffer
     // the firsthdr thingy returns a pointer to the first cmsg header in the ancillary data buffer we linked before (rememebr the union?)
     cmsg_header = CMSG_FIRSTHDR(&header);
     cmsg_header->cmsg_level = SOL_SOCKET;
-    cmsg_header->cmsg_type = SCM_RIGHTS;
-    cmsg_header->cmsg_len = CMSG_LEN(sizeof(fds)); //cant set it directly cus length differs bcs the paddding differs across different archs me thinks
-    memcpy(CMSG_DATA(cmsg_header), fds, sizeof(fds)); 
+    cmsg_header->cmsg_type = SCM_CREDENTIALS;
+    cmsg_header->cmsg_len = CMSG_LEN(sizeof(struct ucred)); //cant set it directly cus length differs bcs the paddding differs across different archs me thinks
+    memcpy(CMSG_DATA(cmsg_header), &creds, sizeof(creds)); 
     
     // now we finally send the message
     ssize_t n = sendmsg(conn_fd, &header, 0);
     if (n < 0 ) perror("sending didnt work out");
 
     // welp business is done, we close the socket, and the other open fds on our side atleast
-    close(conn_fd); close(cookie_fd); close(banana_fd);
+    close(conn_fd);
 }

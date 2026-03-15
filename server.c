@@ -53,19 +53,23 @@ int main() {
     // listen for connections, max 20 in the queue
     if (listen(listen_fd, 20) < 0) {perror("listenin aint workin"); exit(EXIT_FAILURE);}
 
-    
+    // we need to set the SO_PASSCRED option so that we can pass pids, etc, using SCM_CREDENTIALS
+    int enable = 1;
+    setsockopt(listen_fd, SOL_SOCKET, SO_PASSCRED, &enable, sizeof(enable));
+
     // accept connection and what was sent, this created a connected socket
     struct sockaddr_un conn_address; // dont have to set anything here since were accepting the client
     socklen_t conn_size = sizeof(conn_address); // need it as a varibale to it could be reference in accept()
     // so this socket is specifically for that specific accepted connection, while our prev socket is the one that welcomes all the connections in general
     int accept_fd;
     // buffer for our main message
-    char main_message[1024]; char fd_buf[1024];
-    int fds[2];
+    char message[1024];
+    // the ds we'll use to store the credentials
+    struct ucred creds; // apparently pid_t, gid_t, uid_t wont ever be larger than a long so we'll print them that way
 
     // need to use a union for alignment, this will hold the ancillary data itself
     union {
-        char buf[CMSG_SPACE(2 * sizeof(int))];
+        char buf[CMSG_SPACE(sizeof(struct ucred))];
         struct cmsghdr align;
     } cmsg;
 
@@ -78,7 +82,7 @@ int main() {
     header.msg_namelen = 0;
     // now we have to store the message itself
     struct iovec tosend; // its a ds sys calls use for arrays
-    tosend.iov_base = main_message; tosend.iov_len = sizeof(main_message);
+    tosend.iov_base = message; tosend.iov_len = sizeof(message);
     // now lets bind that iov to the message header
     header.msg_iov = &tosend;
     header.msg_iovlen = 1; 
@@ -89,8 +93,6 @@ int main() {
     struct cmsghdr * cmsg_header = CMSG_FIRSTHDR(&header);
 
     while (running) {
-        // emptying the buffer after each run
-        memset(fd_buf, 0, sizeof(fd_buf));
         // this means that if it fails, we shouldn't be shutting the whole thing down, just skip over this one
         // btw accept is blocking (checl that out with strace), thats why multithreaded servers are so gudddt
         accept_fd = accept(listen_fd, (struct sockaddr *) &conn_address, &conn_size);
@@ -102,14 +104,10 @@ int main() {
         // lets retrieve our messageee :3
         if (recvmsg(accept_fd, &header, 0) == -1) perror("receivin went wrong");
         // now the original message is stored in its complementary variable
-        printf("the main message: %s\n", main_message);
-        memcpy(fds, CMSG_DATA(cmsg_header), sizeof(fds));
-        for (int i = 0; i < 2; i++) {
-            if (read(fds[i], fd_buf, 1024) == -1) perror("aint read");
-            printf("file %i: %s\n", i, fd_buf);
-        }
+        printf("the main message: %s\n", message);
+        memcpy(&creds, CMSG_DATA(cmsg_header), sizeof(struct ucred));
+        printf("The credentials:\npid: %d\ngid: %d\nuid: %d\n", creds.pid, creds.gid, creds.uid);
         close(accept_fd); // still need to close it
-        for (int i = 0; i < 2; i++) close(fds[i]); // close the file fds
     }
     
     // remember that bind creates that temp.sock file so we have to use unlink to delete that file
@@ -117,5 +115,6 @@ int main() {
     // i think we have to decouple and close stuff here but we won't reach it for now
     close(accept_fd); close(listen_fd);
     printf("\ncleanup is done!!\n");
+    
 }
 
